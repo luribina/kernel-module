@@ -21,15 +21,15 @@ MODULE_VERSION("1.0");
 
 static struct proc_dir_entry *out_file;
 static char lab2_buffer[BUF_MAX_SIZE];
-static size_t lab2_buffer_size = 0;
 
 static ssize_t lab2_read(struct file *file_ptr, char __user *ubuffer, size_t buf_length, loff_t *offset)
 {
-    pr_info("Proc file %s is being read\n", PROC_FILE_NAME);
     char hui[5] = "hui\n";
-    hui[4] = '\0';
     int len = sizeof(hui);
     ssize_t ret = len;
+    hui[4] = '\0';
+
+    pr_info("Proc file %s is being read\n", PROC_FILE_NAME);
 
     if (*offset >= len || copy_to_user(ubuffer, hui, len))
     {
@@ -48,19 +48,20 @@ static ssize_t lab2_write(struct file *file_ptr, const char __user *ubuffer, siz
 {
     pr_info("Proc file %s is being written\n", PROC_FILE_NAME);
 
-    lab2_buffer_size = buf_length;
-    if (lab2_buffer_size > BUF_MAX_SIZE)
+    if (buf_length > BUF_MAX_SIZE - 1)
     {
-        lab2_buffer_size = BUF_MAX_SIZE;
+        return -EINVAL;
     }
 
-    if (copy_from_user(lab2_buffer, ubuffer, lab2_buffer_size))
+    if (copy_from_user(lab2_buffer, ubuffer, buf_length))
     {
         return -EFAULT;
     }
 
-    pr_info("Proc file wriеe end %s\n", lab2_buffer);
-    return 0;
+    lab2_buffer[buf_length] = '\0';
+
+    pr_info("Proc file write end %s\n", lab2_buffer);
+    return buf_length;
 }
 
 #ifdef HAVE_PROC_OPS
@@ -79,7 +80,7 @@ static int __init lab2_init(void)
     pr_info("Loaded lab2 module\n");
     pr_info("Module can read info to procfs from bpf_redirect_info and dm_dirty_log_type\n");
 
-    out_file = proc_create(PROC_FILE_NAME, 0644, NULL, &proc_file_ops);
+    out_file = proc_create(PROC_FILE_NAME, 0666, NULL, &proc_file_ops);
 
     if (out_file == NULL)
     {
@@ -98,3 +99,54 @@ static void __exit lab2_exit(void)
 
 module_init(lab2_init);
 module_exit(lab2_exit);
+
+
+struct bpf_redirect_info * get_bpf_redirect_info()
+{
+    struct bpf_redirect_info * ri = this_cpu_ptr(&bpf_redirect_info);
+    return ri;
+}
+
+static struct list_head * log_head;
+
+static struct dm_dirty_log_type lab2log = {
+	.name = "lab2log",
+	.module = THIS_MODULE,
+	.ctr = NULL,
+	.dtr = NULL,
+	.resume = NULL,
+	.get_region_size = NULL,
+	.is_clean = NULL,
+	.in_sync = NULL,
+	.flush = NULL,
+	.mark_region = NULL,
+	.clear_region = NULL,
+	.get_resync_work = NULL,
+	.set_region_sync = NULL,
+	.get_sync_count = NULL,
+	.status = NULL,
+};
+
+// available names for log types based on kernel code
+// - core
+// - disk
+// - userspace
+
+// We register and unregister useless log_type in order to get 
+// list_head _logtypes(see drivers/md/dm-log.c:19 v.5.15.5)
+// Later we can use it in list_for_each_entry to iterate 
+// over all registered dm_dirty_log_type instances
+int get_dm_dirty_log_type_head()
+{
+    // dm dirty hack
+    int r;
+
+    //TODO add check for return code
+    r = dm_dirty_log_type_register(&lab2log);
+
+    log_head = lab2log.list.prev; // очевидно пиздец, кто такие варики выдает бля
+
+    //TODO add check for return code
+    r = dm_dirty_log_type_unregister(&lab2log);
+    return 0;
+}
