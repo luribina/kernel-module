@@ -1,8 +1,6 @@
 obj-m += lab2.o
 
-all: default
-
-default:
+all: 
 	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
 
 clean:

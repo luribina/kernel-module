@@ -4,8 +4,9 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/proc_fs.h>
-#include <linux/version.h>
+#include <linux/types.h>
 #include <linux/uaccess.h>
+#include <linux/version.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("luribina");
@@ -21,44 +22,102 @@ MODULE_VERSION("1.0");
 
 static struct proc_dir_entry *out_file;
 static char lab2_buffer[BUF_MAX_SIZE];
+static struct list_head * log_head = NULL;
+static bool is_ready = false;
+static bool is_bpf = false;
+static bool is_dm_dirty_log_type = false;
+
+static struct bpf_redirect_info * get_bpf_redirect_info(void);
+
+static int get_dm_dirty_log_type_head(void);
 
 static ssize_t lab2_read(struct file *file_ptr, char __user *ubuffer, size_t buf_length, loff_t *offset)
 {
     char hui[5] = "hui\n";
     int len = sizeof(hui);
+    int r;
+    struct dm_dirty_log_type *log_type;
     ssize_t ret = len;
     hui[4] = '\0';
 
     pr_info("Proc file %s is being read\n", PROC_FILE_NAME);
 
-    if (*offset >= len || copy_to_user(ubuffer, hui, len))
+    if (*offset >= len || buf_length < len)
     {
         pr_info("Read finish\n");
-        ret = 0;
+        return 0;
     }
-    else
-    {
-        pr_info("Procfile read succeed %s\n", file_ptr->f_path.dentry->d_name.name);
-        *offset += len;
+    
+    if (copy_to_user(ubuffer, hui, len)) {
+        return -EFAULT;
     }
+
+    pr_info("Procfile read succeed %s\n", file_ptr->f_path.dentry->d_name.name);
+    *offset += len;
+    
+    if (!is_ready) {
+        return ret;
+    }
+
+    if (is_bpf) {
+        struct bpf_redirect_info * bpf = get_bpf_redirect_info();
+        pr_info("BPF_INFO %u \n", bpf->flags);
+    }
+
+    if (is_dm_dirty_log_type) {
+        if (log_head == NULL) {
+            r = get_dm_dirty_log_type_head();
+            if (r) { 
+                pr_info("Could not obtain dm info\n");
+                return 0;
+            }
+        }
+
+        list_for_each_entry(log_type, log_head, list) if (log_type != NULL)
+            pr_info("Log name %s\n", log_type->name);
+    }
+
     return ret;
 }
 
 static ssize_t lab2_write(struct file *file_ptr, const char __user *ubuffer, size_t buf_length, loff_t *offset)
 {
+    int r, mode;
     pr_info("Proc file %s is being written\n", PROC_FILE_NAME);
 
-    if (buf_length > BUF_MAX_SIZE - 1)
-    {
+    if (buf_length > BUF_MAX_SIZE - 1) {
         return -EINVAL;
     }
 
-    if (copy_from_user(lab2_buffer, ubuffer, buf_length))
-    {
+    if (copy_from_user(lab2_buffer, ubuffer, buf_length)) {
         return -EFAULT;
     }
 
-    lab2_buffer[buf_length] = '\0';
+    is_ready = false;
+
+    r = sscanf(lab2_buffer, "%d", &mode);
+    if (r != 1) {
+        pr_info("Got non matching input\n");
+        return buf_length;
+    }
+
+    if (mode == 0) {
+        is_ready = true;
+        is_bpf = true;
+        is_dm_dirty_log_type = false;
+    }
+
+    if (mode == 1) {
+        is_ready = true;
+        is_bpf = false;
+        is_dm_dirty_log_type = true;
+    }
+
+    if (!is_ready) {
+        pr_info("Not supported mode %d\n", mode);
+    } else{
+        pr_info("Current mode %d\n", mode);
+    }
 
     pr_info("Proc file write end %s\n", lab2_buffer);
     return buf_length;
@@ -82,8 +141,7 @@ static int __init lab2_init(void)
 
     out_file = proc_create(PROC_FILE_NAME, 0666, NULL, &proc_file_ops);
 
-    if (out_file == NULL)
-    {
+    if (out_file == NULL) {
         pr_alert("Could not create file for some reason\n");
         return -EIO;
     }
@@ -100,16 +158,13 @@ static void __exit lab2_exit(void)
 module_init(lab2_init);
 module_exit(lab2_exit);
 
-
-struct bpf_redirect_info * get_bpf_redirect_info()
+static struct bpf_redirect_info * get_bpf_redirect_info(void)
 {
     struct bpf_redirect_info * ri = this_cpu_ptr(&bpf_redirect_info);
     return ri;
 }
 
-static struct list_head * log_head;
-
-static struct dm_dirty_log_type lab2log = {
+static struct dm_dirty_log_type lab2_log = {
 	.name = "lab2log",
 	.module = THIS_MODULE,
 	.ctr = NULL,
@@ -127,26 +182,27 @@ static struct dm_dirty_log_type lab2log = {
 	.status = NULL,
 };
 
-// available names for log types based on kernel code
-// - core
-// - disk
-// - userspace
+// possible names for log types based on kernel code
+// - core (load dm-log)
+// - disk (load dm-log)
+// - userspace(probably need to load another module, but im not sure which one)
 
 // We register and unregister useless log_type in order to get 
 // list_head _logtypes(see drivers/md/dm-log.c:19 v.5.15.5)
 // Later we can use it in list_for_each_entry to iterate 
 // over all registered dm_dirty_log_type instances
-int get_dm_dirty_log_type_head()
+static int get_dm_dirty_log_type_head(void)
 {
     // dm dirty hack
     int r;
 
-    //TODO add check for return code
-    r = dm_dirty_log_type_register(&lab2log);
+    r = dm_dirty_log_type_register(&lab2_log);
+    if (r) { return r; }
 
-    log_head = lab2log.list.prev; // очевидно пиздец, кто такие варики выдает бля
+    log_head = lab2_log.list.prev; // очевидно пиздец, кто такие варики выдает бля
 
-    //TODO add check for return code
-    r = dm_dirty_log_type_unregister(&lab2log);
+    r = dm_dirty_log_type_unregister(&lab2_log);
+    if (r) { return r; }
+
     return 0;
 }
